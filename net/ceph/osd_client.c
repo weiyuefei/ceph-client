@@ -2687,11 +2687,15 @@ static struct ceph_msg *get_reply(struct ceph_connection *con,
 	tid = le64_to_cpu(hdr->tid);
 	mutex_lock(&osdc->request_mutex);
 	req = __lookup_request(osdc, tid);
-	if (!req) {
+	if (!req || con != &req->r_osd->o_con) {
+		if (req)
+			dout("%s skip tid %llu response from old connection\n",
+			     __func__, tid);
+		else
+			dout("%s unknown tid %llu from osd%d\n", __func__, tid,
+			     osd->o_osd);
 		*skip = 1;
 		m = NULL;
-		dout("get_reply unknown tid %llu from osd%d\n", tid,
-		     osd->o_osd);
 		goto out;
 	}
 
