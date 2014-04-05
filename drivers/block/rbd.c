@@ -2772,7 +2772,8 @@ static bool rbd_img_obj_request_simple(struct rbd_obj_request *obj_request)
 	obj_size = (u64) 1 << rbd_dev->header.obj_order;
 
 	/* Read requests didn't need special handling */
-	if (!img_request_write_test(img_request))
+	if (!img_request_write_test(img_request) &&
+		!img_request_discard_test(img_request))
 		return true;
 
 	/* No-layered writes are simple requests*/
