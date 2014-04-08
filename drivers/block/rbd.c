@@ -1976,19 +1976,14 @@ static bool rbd_dev_parent_get(struct rbd_device *rbd_dev)
 static struct rbd_img_request *rbd_img_request_create(
 					struct rbd_device *rbd_dev,
 					u64 offset, u64 length,
-					bool write_request)
+					bool write_request,
+					struct ceph_snap_context *snapc)
 {
 	struct rbd_img_request *img_request;
 
 	img_request = kmem_cache_alloc(rbd_img_request_cache, GFP_ATOMIC);
 	if (!img_request)
 		return NULL;
-
-	if (write_request) {
-		down_read(&rbd_dev->header_rwsem);
-		ceph_get_snap_context(rbd_dev->header.snapc);
-		up_read(&rbd_dev->header_rwsem);
-	}
 
 	img_request->rq = NULL;
 	img_request->rbd_dev = rbd_dev;
@@ -1997,7 +1992,7 @@ static struct rbd_img_request *rbd_img_request_create(
 	img_request->flags = 0;
 	if (write_request) {
 		img_request_write_set(img_request);
-		img_request->snapc = rbd_dev->header.snapc;
+		img_request->snapc = snapc;
 	} else {
 		img_request->snap_id = rbd_dev->spec->snap_id;
 	}
@@ -2053,8 +2048,8 @@ static struct rbd_img_request *rbd_parent_request_create(
 	rbd_assert(obj_request->img_request);
 	rbd_dev = obj_request->img_request->rbd_dev;
 
-	parent_request = rbd_img_request_create(rbd_dev->parent,
-						img_offset, length, false);
+	parent_request = rbd_img_request_create(rbd_dev->parent, img_offset,
+						length, false, NULL);
 	if (!parent_request)
 		return NULL;
 
@@ -3129,8 +3124,10 @@ static void rbd_request_fn(struct request_queue *q)
 	while ((rq = blk_fetch_request(q))) {
 		bool write_request = rq_data_dir(rq) == WRITE;
 		struct rbd_img_request *img_request;
+		struct ceph_snap_context *snapc = NULL;
 		u64 offset;
 		u64 length;
+		u64 mapping_size;
 
 		/* Ignore any non-FS requests that filter through. */
 
@@ -3184,8 +3181,16 @@ static void rbd_request_fn(struct request_queue *q)
 			goto end_request;	/* Shouldn't happen */
 		}
 
+		down_read(&rbd_dev->header_rwsem);
+		mapping_size = rbd_dev->mapping.size;
+		if (op_type != OBJ_OP_READ) {
+			snapc = rbd_dev->header.snapc;
+			ceph_get_snap_context(snapc);
+		}
+		up_read(&rbd_dev->header_rwsem);
+
 		result = -EIO;
-		if (offset + length > rbd_dev->mapping.size) {
+		if (offset + length > mapping_size) {
 			rbd_warn(rbd_dev, "beyond EOD (%llu~%llu > %llu)\n",
 				offset, length, rbd_dev->mapping.size);
 			goto end_request;
@@ -3193,7 +3198,7 @@ static void rbd_request_fn(struct request_queue *q)
 
 		result = -ENOMEM;
 		img_request = rbd_img_request_create(rbd_dev, offset, length,
-							write_request);
+							write_request, snapc);
 		if (!img_request)
 			goto end_request;
 
@@ -3211,6 +3216,8 @@ end_request:
 			rbd_warn(rbd_dev, "%s %llx at %llx result %d\n",
 				write_request ? "write" : "read",
 				length, offset, result);
+			if (snapc)
+				ceph_put_snap_context(snapc);
 
 			__blk_end_request_all(rq, result);
 		}
