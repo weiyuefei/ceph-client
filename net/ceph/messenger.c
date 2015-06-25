@@ -484,7 +484,7 @@ static int ceph_tcp_connect(struct ceph_connection *con)
 			       IPPROTO_TCP, &sock);
 	if (ret)
 		return ret;
-	sock->sk->sk_allocation = GFP_NOFS | __GFP_MEMALLOC;
+	sock->sk->sk_allocation = GFP_NOIO | __GFP_MEMALLOC;
 
 #ifdef CONFIG_LOCKDEP
 	lockdep_set_class(&sock->sk->sk_lock, &socket_class);

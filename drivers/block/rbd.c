@@ -1998,11 +1998,11 @@ static struct rbd_obj_request *rbd_obj_request_create(const char *object_name,
 	rbd_assert(obj_request_type_valid(type));
 
 	size = strlen(object_name) + 1;
-	name = kmalloc(size, GFP_KERNEL);
+	name = kmalloc(size, GFP_NOIO);
 	if (!name)
 		return NULL;
 
-	obj_request = kmem_cache_zalloc(rbd_obj_request_cache, GFP_KERNEL);
+	obj_request = kmem_cache_zalloc(rbd_obj_request_cache, GFP_NOIO);
 	if (!obj_request) {
 		kfree(name);
 		return NULL;
@@ -2683,7 +2683,7 @@ static int rbd_img_obj_parent_read_full(struct rbd_obj_request *obj_request)
 	 * from the parent.
 	 */
 	page_count = (u32)calc_pages_for(0, length);
-	pages = ceph_alloc_page_vector(page_count, GFP_KERNEL);
+	pages = ceph_alloc_page_vector(page_count, GFP_NOIO);
 	if (IS_ERR(pages)) {
 		result = PTR_ERR(pages);
 		pages = NULL;
@@ -2810,7 +2810,7 @@ static int rbd_img_obj_exists_submit(struct rbd_obj_request *obj_request)
 	 */
 	size = sizeof (__le64) + sizeof (__le32) + sizeof (__le32);
 	page_count = (u32)calc_pages_for(0, size);
-	pages = ceph_alloc_page_vector(page_count, GFP_KERNEL);
+	pages = ceph_alloc_page_vector(page_count, GFP_NOIO);
 	if (IS_ERR(pages))
 		return PTR_ERR(pages);
 

@@ -958,7 +958,7 @@ static struct ceph_osd *create_osd(struct ceph_osd_client *osdc, int onum)
 {
 	struct ceph_osd *osd;
 
-	osd = kzalloc(sizeof(*osd), GFP_NOFS);
+	osd = kzalloc(sizeof(*osd), GFP_NOIO);
 	if (!osd)
 		return NULL;
 
