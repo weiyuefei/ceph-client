@@ -1702,7 +1702,7 @@ enum {
 	POOL_WRITE	= 2,
 };
 
-static int __ceph_pool_perm_get(struct ceph_inode_info *ci, u32 pool)
+static int __ceph_pool_perm_get(struct ceph_inode_info *ci, s64 pool)
 {
 	struct ceph_fs_client *fsc = ceph_inode_to_client(&ci->vfs_inode);
 	struct ceph_mds_client *mdsc = fsc->mdsc;
@@ -1729,7 +1729,7 @@ static int __ceph_pool_perm_get(struct ceph_inode_info *ci, u32 pool)
 	if (*p)
 		goto out;
 
-	dout("__ceph_pool_perm_get pool %u no perm cached\n", pool);
+	dout("__ceph_pool_perm_get pool %lld no perm cached\n", pool);
 
 	down_write(&mdsc->pool_perm_rwsem);
 	parent = NULL;
@@ -1834,13 +1834,13 @@ out_unlock:
 out:
 	if (!err)
 		err = have;
-	dout("__ceph_pool_perm_get pool %u result = %d\n", pool, err);
+	dout("__ceph_pool_perm_get pool %lld result = %d\n", pool, err);
 	return err;
 }
 
 int ceph_pool_perm_check(struct ceph_inode_info *ci, int need)
 {
-	u32 pool;
+	s64 pool;
 	int ret, flags;
 
 	if (ceph_test_mount_opt(ceph_inode_to_client(&ci->vfs_inode),
@@ -1849,17 +1849,17 @@ int ceph_pool_perm_check(struct ceph_inode_info *ci, int need)
 
 	spin_lock(&ci->i_ceph_lock);
 	flags = ci->i_ceph_flags;
-	pool = ceph_file_layout_pg_pool(ci->i_layout);
+	pool = ci->i_layout.pool_id;
 	spin_unlock(&ci->i_ceph_lock);
 check:
 	if (flags & CEPH_I_POOL_PERM) {
 		if ((need & CEPH_CAP_FILE_RD) && !(flags & CEPH_I_POOL_RD)) {
-			dout("ceph_pool_perm_check pool %u no read perm\n",
+			dout("ceph_pool_perm_check pool %lld no read perm\n",
 			     pool);
 			return -EPERM;
 		}
 		if ((need & CEPH_CAP_FILE_WR) && !(flags & CEPH_I_POOL_WR)) {
-			dout("ceph_pool_perm_check pool %u no write perm\n",
+			dout("ceph_pool_perm_check pool %lld no write perm\n",
 			     pool);
 			return -EPERM;
 		}
@@ -1877,10 +1877,10 @@ check:
 		flags |= CEPH_I_POOL_WR;
 
 	spin_lock(&ci->i_ceph_lock);
-	if (pool == ceph_file_layout_pg_pool(ci->i_layout)) {
+	if (pool == ci->i_layout.pool_id) {
 		ci->i_ceph_flags = flags;
         } else {
-		pool = ceph_file_layout_pg_pool(ci->i_layout);
+		pool = ci->i_layout.pool_id;
 		flags = ci->i_ceph_flags;
 	}
 	spin_unlock(&ci->i_ceph_lock);
