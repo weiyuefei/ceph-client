@@ -1440,6 +1440,16 @@ bad:
 	return ERR_PTR(err);
 }
 
+void ceph_oloc_copy(struct ceph_object_locator *dest,
+		    const struct ceph_object_locator *src)
+{
+	dest->pool = src->pool;
+	dest->pool_ns = src->pool_ns;
+	if (dest->pool_ns)
+		ceph_get_string(dest->pool_ns);
+}
+EXPORT_SYMBOL(ceph_oloc_copy);
+
 void ceph_oid_copy(struct ceph_object_id *dest,
 		   const struct ceph_object_id *src)
 {
@@ -1774,12 +1784,33 @@ int ceph_object_locator_to_pg(struct ceph_osdmap *osdmap,
 	if (!pi)
 		return -ENOENT;
 
-	raw_pgid->pool = oloc->pool;
-	raw_pgid->seed = ceph_str_hash(pi->object_hash, oid->name,
-				       oid->name_len);
-
-	dout("%s %s -> raw_pgid %llu.%x\n", __func__, oid->name,
-	     raw_pgid->pool, raw_pgid->seed);
+	if (!oloc->pool_ns) {
+		raw_pgid->pool = oloc->pool;
+		raw_pgid->seed = ceph_str_hash(pi->object_hash, oid->name,
+					     oid->name_len);
+		dout("%s %s -> raw_pgid %llu.%x\n", __func__, oid->name,
+		     raw_pgid->pool, raw_pgid->seed);
+	} else {
+		char stack_buf[256];
+		char *buf = stack_buf;
+		int nsl = oloc->pool_ns->len;
+		size_t total = nsl + 1 + oid->name_len;
+		if (total > sizeof(stack_buf)) {
+			buf = kmalloc(total, GFP_NOFS);
+			if (!buf)
+				return -ENOMEM;
+		}
+		memcpy(buf, oloc->pool_ns->str, nsl);
+		buf[nsl] = '\037';
+		memcpy(buf + nsl + 1, oid->name, oid->name_len);
+		raw_pgid->pool = oloc->pool;
+		raw_pgid->seed = ceph_str_hash(pi->object_hash, buf, total);
+		if (buf != stack_buf)
+			kfree(buf);
+		dout("%s '%s' ns '%.*s' -> raw_pgid %llu.%x\n", __func__,
+		     oid->name, nsl, oloc->pool_ns->str,
+		     raw_pgid->pool, raw_pgid->seed);
+	}
 	return 0;
 }
 EXPORT_SYMBOL(ceph_object_locator_to_pg);

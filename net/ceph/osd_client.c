@@ -388,6 +388,7 @@ static void target_destroy(struct ceph_osd_request_target *t)
 {
 	ceph_oid_destroy(&t->base_oid);
 	ceph_oid_destroy(&t->target_oid);
+	ceph_put_string(t->base_oloc.pool_ns);
 }
 
 /*
@@ -536,6 +537,7 @@ EXPORT_SYMBOL(ceph_osdc_alloc_request);
 int ceph_osdc_alloc_messages(struct ceph_osd_request *req, gfp_t gfp)
 {
 	struct ceph_osd_client *osdc = req->r_osdc;
+	struct ceph_string *pool_ns = req->r_base_oloc.pool_ns;
 	struct ceph_msg *msg;
 	int msg_size;
 
@@ -544,7 +546,8 @@ int ceph_osdc_alloc_messages(struct ceph_osd_request *req, gfp_t gfp)
 	/* create request message */
 	msg_size = 4 + 4 + 4; /* client_inc, osdmap_epoch, flags */
 	msg_size += 4 + 4 + 4 + 8; /* mtime, reassert_version */
-	msg_size += 2 + 4 + 8 + 4 + 4; /* oloc */
+	msg_size += 2 + 4 + 8 + 4 + 4 + 4 +
+		    (pool_ns ? pool_ns->len : 0); /* oloc */
 	msg_size += 1 + 8 + 4 + 4; /* pgid */
 	msg_size += 4 + req->r_base_oid.name_len; /* oid */
 	msg_size += 2 + req->r_num_ops * sizeof(struct ceph_osd_op);
@@ -949,6 +952,7 @@ struct ceph_osd_request *ceph_osdc_new_request(struct ceph_osd_client *osdc,
 
 	req->r_flags = flags;
 	req->r_base_oloc.pool = layout->pool_id;
+	req->r_base_oloc.pool_ns = ceph_try_get_string(layout->pool_ns);
 	ceph_oid_printf(&req->r_base_oid, "%llx.%08llx", vino.ino, objnum);
 
 	req->r_snapid = vino.snap;
@@ -1328,7 +1332,8 @@ static enum calc_target_result calc_target(struct ceph_osd_client *osdc,
 		need_check_tiering = true;
 	}
 	if (ceph_oloc_empty(&t->target_oloc) || force_resend) {
-		ceph_oloc_copy(&t->target_oloc, &t->base_oloc);
+		t->target_oloc.pool = t->base_oloc.pool;
+		/* do not copy pool_ns */
 		need_check_tiering = true;
 	}
 
@@ -1340,8 +1345,10 @@ static enum calc_target_result calc_target(struct ceph_osd_client *osdc,
 			t->target_oloc.pool = pi->write_tier;
 	}
 
+	t->target_oloc.pool_ns = t->base_oloc.pool_ns;
 	ret = ceph_object_locator_to_pg(osdc->osdmap, &t->target_oid,
 					&t->target_oloc, &pgid);
+	t->target_oloc.pool_ns = NULL;
 	if (ret) {
 		WARN_ON(ret != -ENOENT);
 		t->osd = CEPH_HOMELESS_OSD;
@@ -1468,6 +1475,7 @@ static void encode_request(struct ceph_osd_request *req, struct ceph_msg *msg)
 	void *const end = p + msg->front_alloc_len;
 	u32 data_len = 0;
 	int i;
+	struct ceph_string *pool_ns = req->r_base_oloc.pool_ns;
 
 	if (req->r_flags & CEPH_OSD_FLAG_WRITE) {
 		/* snapshots aren't writeable */
@@ -1489,12 +1497,18 @@ static void encode_request(struct ceph_osd_request *req, struct ceph_msg *msg)
 	p += sizeof(req->r_replay_version);
 
 	/* oloc */
+	ceph_encode_8(&p, 5);
 	ceph_encode_8(&p, 4);
-	ceph_encode_8(&p, 4);
-	ceph_encode_32(&p, 8 + 4 + 4);
+	ceph_encode_32(&p, 8 + 4 + 4 + 4 + (pool_ns ? pool_ns->len : 0));
 	ceph_encode_64(&p, req->r_t.target_oloc.pool);
 	ceph_encode_32(&p, -1); /* preferred */
 	ceph_encode_32(&p, 0); /* key len */
+	if (pool_ns) {
+		ceph_encode_32(&p, pool_ns->len);
+		ceph_encode_copy(&p, pool_ns->str, pool_ns->len);
+	} else {
+		ceph_encode_32(&p, 0);
+	}
 
 	/* pgid */
 	ceph_encode_8(&p, 1);
@@ -2594,10 +2608,10 @@ static int ceph_oloc_decode(void **p, void *end,
 	}
 
 	if (struct_v >= 5) {
-		len = ceph_decode_32(p);
-		if (len > 0) {
-			pr_warn("ceph_object_locator::nspace is set\n");
-			goto e_inval;
+		u32 ns_len = ceph_decode_32(p);
+		if (ns_len > 0) {
+			ceph_decode_need(p, end, ns_len, e_inval);
+			*p += ns_len;
 		}
 	}
 
@@ -2835,7 +2849,8 @@ static void handle_reply(struct ceph_osd *osd, struct ceph_msg *msg)
 		unlink_request(osd, req);
 		mutex_unlock(&osd->lock);
 
-		ceph_oloc_copy(&req->r_t.target_oloc, &m.redirect.oloc);
+		req->r_t.target_oloc.pool = m.redirect.oloc.pool;
+		/* do not change pool_ns */
 		req->r_flags |= CEPH_OSD_FLAG_REDIRECTED;
 		req->r_tid = 0;
 		__submit_request(req, false);
