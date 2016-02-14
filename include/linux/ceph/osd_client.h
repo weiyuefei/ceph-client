@@ -14,6 +14,7 @@
 
 struct ceph_msg;
 struct ceph_snap_context;
+struct ceph_string;
 struct ceph_osd_request;
 struct ceph_osd_client;
 
@@ -319,6 +320,7 @@ extern void osd_req_op_alloc_hint_init(struct ceph_osd_request *osd_req,
 
 extern struct ceph_osd_request *ceph_osdc_alloc_request(struct ceph_osd_client *osdc,
 					       struct ceph_snap_context *snapc,
+					       struct ceph_string *pool_ns,
 					       unsigned int num_ops,
 					       bool use_mempool,
 					       gfp_t gfp_flags);
