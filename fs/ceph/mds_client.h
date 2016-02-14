@@ -44,6 +44,8 @@ struct ceph_mds_reply_info_in {
 	u64 inline_version;
 	u32 inline_len;
 	char *inline_data;
+	u32 pool_ns_len;
+	char *pool_ns_data;
 };
 
 /*
@@ -269,6 +271,8 @@ struct ceph_pool_perm {
 	struct rb_node node;
 	int perm;
 	s64 pool;
+	size_t pool_ns_len;
+	char pool_ns[];
 };
 
 /*

@@ -3,6 +3,7 @@
  */
 #include <linux/module.h>
 #include <linux/ceph/types.h>
+#include <linux/ceph/string_table.h>
 
 /*
  * return true if @layout appears to be valid
