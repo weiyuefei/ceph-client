@@ -18,6 +18,7 @@
 #include "super.h"
 #include "mds_client.h"
 #include "cache.h"
+#include "layout_table.h"
 
 #include <linux/ceph/ceph_features.h>
 #include <linux/ceph/decode.h>
@@ -1058,6 +1059,7 @@ static void __exit exit_ceph(void)
 {
 	dout("exit_ceph\n");
 	unregister_filesystem(&ceph_fs_type);
+	ceph_layout_table_cleanup();
 	ceph_xattr_exit();
 	destroy_caches();
 }
