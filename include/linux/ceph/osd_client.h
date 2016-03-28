@@ -329,16 +329,6 @@ extern void ceph_osdc_build_request(struct ceph_osd_request *req, u64 off,
 				    u64 snap_id,
 				    struct timespec *mtime);
 
-extern struct ceph_osd_request *ceph_osdc_new_request(struct ceph_osd_client *,
-				      struct ceph_file_layout *layout,
-				      struct ceph_vino vino,
-				      u64 offset, u64 *len,
-				      unsigned int which, int num_ops,
-				      int opcode, int flags,
-				      struct ceph_snap_context *snapc,
-				      u32 truncate_seq, u64 truncate_size,
-				      bool use_mempool);
-
 extern void ceph_osdc_set_request_linger(struct ceph_osd_client *osdc,
 					 struct ceph_osd_request *req);
 
@@ -354,23 +344,6 @@ extern int ceph_osdc_wait_request(struct ceph_osd_client *osdc,
 extern void ceph_osdc_sync(struct ceph_osd_client *osdc);
 
 extern void ceph_osdc_flush_notifies(struct ceph_osd_client *osdc);
-
-extern int ceph_osdc_readpages(struct ceph_osd_client *osdc,
-			       struct ceph_vino vino,
-			       struct ceph_file_layout *layout,
-			       u64 off, u64 *plen,
-			       u32 truncate_seq, u64 truncate_size,
-			       struct page **pages, int nr_pages,
-			       int page_align);
-
-extern int ceph_osdc_writepages(struct ceph_osd_client *osdc,
-				struct ceph_vino vino,
-				struct ceph_file_layout *layout,
-				struct ceph_snap_context *sc,
-				u64 off, u64 len,
-				u32 truncate_seq, u64 truncate_size,
-				struct timespec *mtime,
-				struct page **pages, int nr_pages);
 
 /* watch/notify events */
 extern int ceph_osdc_create_event(struct ceph_osd_client *osdc,

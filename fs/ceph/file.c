@@ -442,10 +442,8 @@ static int striped_read(struct inode *inode,
 more:
 	page_align = pos & ~PAGE_MASK;
 	this_len = left;
-	ret = ceph_osdc_readpages(&fsc->client->osdc, ceph_vino(inode),
-				  &ci->i_layout, pos, &this_len,
-				  ci->i_truncate_seq,
-				  ci->i_truncate_size,
+	ret = ceph_osdc_readpages(&fsc->client->osdc, ci, pos, &this_len,
+				  ci->i_truncate_seq, ci->i_truncate_size,
 				  page_pos, pages_left, page_align);
 	if (ret == -ENOENT)
 		ret = 0;
@@ -824,16 +822,14 @@ ceph_direct_read_write(struct kiocb *iocb, struct iov_iter *iter,
 		ssize_t len;
 
 		vino = ceph_vino(inode);
-		req = ceph_osdc_new_request(&fsc->client->osdc, &ci->i_layout,
-					    vino, pos, &size, 0,
+		req = ceph_osdc_new_request(&fsc->client->osdc, ci, snapc,
+					    pos, &size, 0,
 					    /*include a 'startsync' command*/
 					    write ? 2 : 1,
 					    write ? CEPH_OSD_OP_WRITE :
 						    CEPH_OSD_OP_READ,
-					    flags, snapc,
-					    ci->i_truncate_seq,
-					    ci->i_truncate_size,
-					    false);
+					    flags, ci->i_truncate_seq,
+					    ci->i_truncate_size, false);
 		if (IS_ERR(req)) {
 			ret = PTR_ERR(req);
 			break;
@@ -1021,9 +1017,9 @@ ceph_sync_write(struct kiocb *iocb, struct iov_iter *from, loff_t pos,
 		int n;
 
 		vino = ceph_vino(inode);
-		req = ceph_osdc_new_request(&fsc->client->osdc, &ci->i_layout,
-					    vino, pos, &len, 0, 1,
-					    CEPH_OSD_OP_WRITE, flags, snapc,
+		req = ceph_osdc_new_request(&fsc->client->osdc, ci, snapc,
+					    pos, &len, 0, 1,
+					    CEPH_OSD_OP_WRITE, flags,
 					    ci->i_truncate_seq,
 					    ci->i_truncate_size,
 					    false);
@@ -1513,13 +1509,12 @@ static int ceph_zero_partial_object(struct inode *inode,
 		op = CEPH_OSD_OP_ZERO;
 	}
 
-	req = ceph_osdc_new_request(&fsc->client->osdc, &ci->i_layout,
-					ceph_vino(inode),
+	req = ceph_osdc_new_request(&fsc->client->osdc, ci, NULL,
 					offset, length,
 					0, 1, op,
 					CEPH_OSD_FLAG_WRITE |
 					CEPH_OSD_FLAG_ONDISK,
-					NULL, 0, 0, false);
+					0, 0, false);
 	if (IS_ERR(req)) {
 		ret = PTR_ERR(req);
 		goto out;

@@ -990,4 +990,26 @@ extern int lock_to_ceph_filelock(struct file_lock *fl, struct ceph_filelock *c);
 extern int ceph_fs_debugfs_init(struct ceph_fs_client *client);
 extern void ceph_fs_debugfs_cleanup(struct ceph_fs_client *client);
 
+/* osdc.c */
+extern struct ceph_osd_request *ceph_osdc_new_request(struct ceph_osd_client *,
+					struct ceph_inode_info *ci,
+					struct ceph_snap_context *snapc,
+					u64 offset, u64 *len,
+					unsigned int which, int num_ops,
+					int opcode, int flags,
+					u32 truncate_seq, u64 truncate_size,
+					bool use_mempool);
+extern int ceph_osdc_readpages(struct ceph_osd_client *osdc,
+			       struct ceph_inode_info *ci,
+			       u64 off, u64 *plen,
+			       u32 truncate_seq, u64 truncate_size,
+			       struct page **pages, int nr_pages,
+			       int page_align);
+extern int ceph_osdc_writepages(struct ceph_osd_client *osdc,
+				struct ceph_inode_info *ci,
+				struct ceph_snap_context *snapc,
+				u64 off, u64 len,
+				u32 truncate_seq, u64 truncate_size,
+				struct timespec *mtime,
+				struct page **pages, int nr_pages);
 #endif /* _FS_CEPH_SUPER_H */

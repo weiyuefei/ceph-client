@@ -223,8 +223,7 @@ static int readpage_nounlock(struct file *filp, struct page *page)
 
 	dout("readpage inode %p file %p page %p index %lu\n",
 	     inode, filp, page, page->index);
-	err = ceph_osdc_readpages(osdc, ceph_vino(inode), &ci->i_layout,
-				  off, &len,
+	err = ceph_osdc_readpages(osdc, ci, off, &len,
 				  ci->i_truncate_seq, ci->i_truncate_size,
 				  &page, 1, 0);
 	if (err == -ENOENT)
@@ -340,9 +339,8 @@ static int start_read(struct inode *inode, struct list_head *page_list, int max)
 	dout("start_read %p nr_pages %d is %lld~%lld\n", inode, nr_pages,
 	     off, len);
 	vino = ceph_vino(inode);
-	req = ceph_osdc_new_request(osdc, &ci->i_layout, vino, off, &len,
-				    0, 1, CEPH_OSD_OP_READ,
-				    CEPH_OSD_FLAG_READ, NULL,
+	req = ceph_osdc_new_request(osdc, ci, NULL, off, &len, 0, 1,
+				    CEPH_OSD_OP_READ, CEPH_OSD_FLAG_READ,
 				    ci->i_truncate_seq, ci->i_truncate_size,
 				    false);
 	if (IS_ERR(req))
@@ -540,9 +538,7 @@ static int writepage_nounlock(struct page *page, struct writeback_control *wbc)
 	ceph_readpage_to_fscache(inode, page);
 
 	set_page_writeback(page);
-	err = ceph_osdc_writepages(osdc, ceph_vino(inode),
-				   &ci->i_layout, snapc,
-				   page_off, len,
+	err = ceph_osdc_writepages(osdc, ci, snapc, page_off, len,
 				   truncate_seq, truncate_size,
 				   &inode->i_mtime, &page, 1);
 	if (err < 0) {
@@ -960,24 +956,24 @@ new_request:
 		len = wsize;
 
 		req = ceph_osdc_new_request(&fsc->client->osdc,
-					&ci->i_layout, vino,
-					offset, &len, 0, num_ops,
-					CEPH_OSD_OP_WRITE,
-					CEPH_OSD_FLAG_WRITE |
-					CEPH_OSD_FLAG_ONDISK,
-					snapc, truncate_seq,
-					truncate_size, false);
+					    ci, snapc,
+					    offset, &len, 0, num_ops,
+					    CEPH_OSD_OP_WRITE,
+					    CEPH_OSD_FLAG_WRITE |
+					    CEPH_OSD_FLAG_ONDISK,
+					    truncate_seq, truncate_size,
+					    false);
 		if (IS_ERR(req)) {
 			req = ceph_osdc_new_request(&fsc->client->osdc,
-						&ci->i_layout, vino,
-						offset, &len, 0,
-						min(num_ops,
-						    CEPH_OSD_SLAB_OPS),
-						CEPH_OSD_OP_WRITE,
-						CEPH_OSD_FLAG_WRITE |
-						CEPH_OSD_FLAG_ONDISK,
-						snapc, truncate_seq,
-						truncate_size, true);
+						    ci, snapc,
+						    offset, &len, 0,
+						    min(num_ops,
+							CEPH_OSD_SLAB_OPS),
+						    CEPH_OSD_OP_WRITE,
+						    CEPH_OSD_FLAG_WRITE |
+						    CEPH_OSD_FLAG_ONDISK,
+						    truncate_seq,
+						    truncate_size, true);
 			BUG_ON(IS_ERR(req));
 		}
 		BUG_ON(len < page_offset(pages[locked_pages - 1]) +
@@ -1605,11 +1601,11 @@ int ceph_uninline_data(struct file *filp, struct page *locked_page)
 		len = err;
 	}
 
-	req = ceph_osdc_new_request(&fsc->client->osdc, &ci->i_layout,
-				    ceph_vino(inode), 0, &len, 0, 1,
+	req = ceph_osdc_new_request(&fsc->client->osdc,
+				    ci, NULL, 0, &len, 0, 1,
 				    CEPH_OSD_OP_CREATE,
 				    CEPH_OSD_FLAG_ONDISK | CEPH_OSD_FLAG_WRITE,
-				    NULL, 0, 0, false);
+				    0, 0, false);
 	if (IS_ERR(req)) {
 		err = PTR_ERR(req);
 		goto out;
@@ -1623,12 +1619,12 @@ int ceph_uninline_data(struct file *filp, struct page *locked_page)
 	if (err < 0)
 		goto out;
 
-	req = ceph_osdc_new_request(&fsc->client->osdc, &ci->i_layout,
-				    ceph_vino(inode), 0, &len, 1, 3,
+	req = ceph_osdc_new_request(&fsc->client->osdc,
+				    ci, NULL, 0, &len, 1, 3,
 				    CEPH_OSD_OP_WRITE,
 				    CEPH_OSD_FLAG_ONDISK | CEPH_OSD_FLAG_WRITE,
-				    NULL, ci->i_truncate_seq,
-				    ci->i_truncate_size, false);
+				    ci->i_truncate_seq, ci->i_truncate_size,
+				    false);
 	if (IS_ERR(req)) {
 		err = PTR_ERR(req);
 		goto out;
