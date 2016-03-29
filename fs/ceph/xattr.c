@@ -62,7 +62,8 @@ static bool ceph_vxattrcb_layout_exists(struct ceph_inode_info *ci)
 	layout = rcu_dereference(ci->i_layout);
 	ret = layout &&
 	      (layout->stripe_unit > 0 || layout->stripe_count > 0 ||
-	       layout->object_size > 0 || layout->pool_id >= 0);
+	       layout->object_size > 0 || layout->pool_id >= 0 ||
+	       layout->pool_ns_len > 0);
 	rcu_read_unlock();
 	return ret;
 }
@@ -70,12 +71,14 @@ static bool ceph_vxattrcb_layout_exists(struct ceph_inode_info *ci)
 static size_t ceph_vxattrcb_layout(struct ceph_inode_info *ci, char *val,
 				   size_t size)
 {
-	int ret;
 	struct ceph_fs_client *fsc = ceph_sb_to_client(ci->vfs_inode.i_sb);
 	struct ceph_osd_client *osdc = &fsc->client->osdc;
 	struct ceph_file_layout *layout;
 	const char *pool_name;
+	const char *ns_field = " pool_namespace=";
 	char buf[128];
+	size_t len, total_len = 0;
+	int ret;
 
 	dout("ceph_vxattrcb_layout %p\n", &ci->vfs_inode);
 	layout = ceph_try_get_layout(ci->i_layout);
@@ -84,32 +87,44 @@ static size_t ceph_vxattrcb_layout(struct ceph_inode_info *ci, char *val,
 	down_read(&osdc->map_sem);
 	pool_name = ceph_pg_pool_name_by_id(osdc->osdmap, layout->pool_id);
 	if (pool_name) {
-		size_t len = strlen(pool_name);
-		ret = snprintf(buf, sizeof(buf),
-		"stripe_unit=%u stripe_count=%u object_size=%u pool=",
-		layout->stripe_unit, layout->stripe_count,
-	        layout->object_size);
-		if (!size) {
-			ret += len;
-		} else if (ret + len > size) {
-			ret = -ERANGE;
-		} else {
-			memcpy(val, buf, ret);
+		len = snprintf(buf, sizeof(buf),
+			"stripe_unit=%u stripe_count=%u object_size=%u pool=",
+			layout->stripe_unit, layout->stripe_count,
+			layout->object_size);
+		total_len = len + strlen(pool_name);
+	} else {
+		len = snprintf(buf, sizeof(buf),
+			"stripe_unit=%u stripe_count=%u object_size=%u pool=%lld",
+			layout->stripe_unit, layout->stripe_count,
+			layout->object_size, (unsigned long long)layout->pool_id);
+		total_len = len;
+	}
+
+	if (layout->pool_ns_len > 0)
+		total_len += strlen(ns_field) + layout->pool_ns_len;
+
+	if (!size) {
+		ret = total_len;
+	} else if (total_len > size) {
+		ret = -ERANGE;
+	} else {
+		memcpy(val, buf, len);
+		ret = len;
+		if (pool_name) {
+			len = strlen(pool_name);
 			memcpy(val + ret, pool_name, len);
 			ret += len;
 		}
-	} else {
-		ret = snprintf(buf, sizeof(buf),
-		"stripe_unit=%u stripe_count=%u object_size=%u pool=%lld",
-		layout->stripe_unit, layout->stripe_count,
-	        layout->object_size, (unsigned long long)layout->pool_id);
-		if (size) {
-			if (ret <= size)
-				memcpy(val, buf, ret);
-			else
-				ret = -ERANGE;
+		if (layout->pool_ns_len) {
+			len = strlen(ns_field);
+			memcpy(val + ret, ns_field, len);
+			ret += len;
+			memcpy(val + ret, layout->pool_ns,
+			       layout->pool_ns_len);
+			ret += layout->pool_ns_len;
 		}
 	}
+
 	up_read(&osdc->map_sem);
 	ceph_put_layout(layout);
 
@@ -143,6 +158,20 @@ static size_t ceph_vxattrcb_layout_object_size(struct ceph_inode_info *ci,
 					       char *val, size_t size)
 {
 	I_LAYOUT_FIELD_VALUE(object_size);
+}
+
+static size_t ceph_vxattrcb_layout_pool_namespace(struct ceph_inode_info *ci,
+                                                 char *val, size_t size)
+{
+	int ret = 0;
+	struct ceph_file_layout *layout;
+	rcu_read_lock();
+	layout = rcu_dereference(ci->i_layout);
+	if (layout)
+		ret = snprintf(val, size, "%.*s",
+			       (int)layout->pool_ns_len, layout->pool_ns);
+	rcu_read_unlock();
+	return ret;
 }
 
 static size_t ceph_vxattrcb_layout_pool(struct ceph_inode_info *ci,
@@ -257,6 +286,7 @@ static struct ceph_vxattr ceph_dir_vxattrs[] = {
 	XATTR_LAYOUT_FIELD(dir, layout, stripe_count),
 	XATTR_LAYOUT_FIELD(dir, layout, object_size),
 	XATTR_LAYOUT_FIELD(dir, layout, pool),
+	XATTR_LAYOUT_FIELD(dir, layout, pool_namespace),
 	XATTR_NAME_CEPH(dir, entries),
 	XATTR_NAME_CEPH(dir, files),
 	XATTR_NAME_CEPH(dir, subdirs),
@@ -284,6 +314,7 @@ static struct ceph_vxattr ceph_file_vxattrs[] = {
 	XATTR_LAYOUT_FIELD(file, layout, stripe_count),
 	XATTR_LAYOUT_FIELD(file, layout, object_size),
 	XATTR_LAYOUT_FIELD(file, layout, pool),
+	XATTR_LAYOUT_FIELD(file, layout, pool_namespace),
 	{ .name = NULL, 0 }	/* Required table terminator */
 };
 static size_t ceph_file_vxattrs_name_size;	/* total size of all names */

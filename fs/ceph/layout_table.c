@@ -8,7 +8,8 @@ static DEFINE_SPINLOCK(layout_tree_lock);
 static struct rb_root layout_tree = RB_ROOT;
 
 int ceph_compare_layout(struct ceph_file_layout *exist,
-			struct ceph_file_layout_legacy *legacy)
+			struct ceph_file_layout_legacy *legacy,
+			const char *pool_ns, size_t pool_ns_len)
 {
 	struct ceph_file_layout layout;
 	ceph_file_layout_from_legacy(&layout, legacy);
@@ -20,11 +21,16 @@ int ceph_compare_layout(struct ceph_file_layout *exist,
 		return exist->object_size - layout.object_size;
 	if (exist->pool_id != layout.pool_id)
 		return exist->pool_id - layout.pool_id;
+	if (exist->pool_ns_len != pool_ns_len)
+		return exist->pool_ns_len - pool_ns_len;
+	if (pool_ns_len > 0)
+		return memcmp(exist->pool_ns, pool_ns, pool_ns_len);
 	return 0;
 }
 
 struct ceph_file_layout *
-ceph_find_or_create_layout(struct ceph_file_layout_legacy *legacy)
+ceph_find_or_create_layout(struct ceph_file_layout_legacy *legacy,
+			   const char *pool_ns, size_t pool_ns_len)
 {
 	struct __file_layout_node *node, *exist;
 	struct rb_node **p, *parent;
@@ -35,7 +41,8 @@ ceph_find_or_create_layout(struct ceph_file_layout_legacy *legacy)
 	p = &layout_tree.rb_node;
 	while (*p) {
 		exist = rb_entry(*p, struct __file_layout_node, node);
-		ret = ceph_compare_layout(__node_to_layout(exist), legacy);
+		ret = ceph_compare_layout(__node_to_layout(exist),
+					  legacy, pool_ns, pool_ns_len);
 		if (ret > 0)
 			p = &(*p)->rb_left;
 		else if (ret < 0)
@@ -53,13 +60,15 @@ ceph_find_or_create_layout(struct ceph_file_layout_legacy *legacy)
 	if (exist)
 		return __node_to_layout(exist);
 
-	node = kmalloc(sizeof(*node) + sizeof(struct ceph_file_layout),
-		       GFP_NOFS);
+	node = kmalloc(sizeof(*node) + sizeof(struct ceph_file_layout) +
+		       pool_ns_len, GFP_NOFS);
 	if (!node)
 		return NULL;
 
 	kref_init(&node->kref);
 	ceph_file_layout_from_legacy(__node_to_layout(node), legacy);
+	__node_to_layout(node)->pool_ns_len = pool_ns_len;
+	memcpy(__node_to_layout(node)->pool_ns, pool_ns, pool_ns_len);
 
 retry:
 	exist = NULL;
@@ -69,7 +78,8 @@ retry:
 	while (*p) {
 		parent = *p;
 		exist = rb_entry(*p, struct __file_layout_node, node);
-		ret = ceph_compare_layout(__node_to_layout(exist), legacy);
+		ret = ceph_compare_layout(__node_to_layout(exist),
+					  legacy, pool_ns, pool_ns_len);
 		if (ret > 0)
 			p = &(*p)->rb_left;
 		else if (ret < 0)

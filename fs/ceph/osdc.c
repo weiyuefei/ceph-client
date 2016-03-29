@@ -103,6 +103,11 @@ struct ceph_osd_request *ceph_osdc_new_request(struct ceph_osd_client *osdc,
 	}
 
 	req->r_base_oloc.pool = layout->pool_id;
+	if (layout->pool_ns_len > 0) {
+		memcpy(req->r_base_oloc.pool_ns,
+		       layout->pool_ns, layout->pool_ns_len);
+		req->r_base_oloc.pool_ns_len = layout->pool_ns_len;
+	}
 
 	snprintf(req->r_base_oid.name, sizeof(req->r_base_oid.name),
 		 "%llx.%08llx", ci->i_vino.ino, objnum);

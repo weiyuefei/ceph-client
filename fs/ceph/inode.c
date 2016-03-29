@@ -398,7 +398,6 @@ struct inode *ceph_alloc_inode(struct super_block *sb)
 
 	memset(&ci->i_dir_layout, 0, sizeof(ci->i_dir_layout));
 	RCU_INIT_POINTER(ci->i_layout, NULL);
-	ci->i_pool_ns_len = 0;
 
 	ci->i_fragtree = RB_ROOT;
 	mutex_init(&ci->i_fragtree_mutex);
@@ -521,7 +520,7 @@ void ceph_destroy_inode(struct inode *inode)
 	if (ci->i_xattrs.prealloc_blob)
 		ceph_buffer_put(ci->i_xattrs.prealloc_blob);
 
-	ceph_put_layout(rcu_dereference_raw(ci->i_layout));
+	ceph_put_layout(ci->i_layout);
 
 	call_rcu(&inode->i_rcu, ceph_i_callback);
 }
@@ -729,10 +728,14 @@ static int fill_inode(struct inode *inode, struct page *locked_page,
 		rcu_read_lock();
 		old_layout = rcu_dereference(ci->i_layout);
 		new_layout = !old_layout ||
-			     ceph_compare_layout(old_layout, &info->layout);
+			     ceph_compare_layout(old_layout, &info->layout,
+						 iinfo->pool_ns_data,
+						 iinfo->pool_ns_len);
 		rcu_read_unlock();
 		if (new_layout)
-			layout = ceph_find_or_create_layout(&info->layout);
+			layout = ceph_find_or_create_layout(&info->layout,
+							iinfo->pool_ns_data,
+							iinfo->pool_ns_len);
 	}
 
 	spin_lock(&ci->i_ceph_lock);
@@ -790,7 +793,6 @@ static int fill_inode(struct inode *inode, struct page *locked_page,
 	if (new_version ||
 	    (new_issued & (CEPH_CAP_ANY_FILE_RD | CEPH_CAP_ANY_FILE_WR))) {
 		__ceph_inode_set_layout(ci, &layout);
-		ci->i_pool_ns_len = iinfo->pool_ns_len;
 
 		queue_trunc = ceph_fill_file_size(inode, issued,
 					le32_to_cpu(info->truncate_seq),
@@ -954,7 +956,7 @@ out:
 		ceph_put_cap(mdsc, new_cap);
 	if (xattr_blob)
 		ceph_buffer_put(xattr_blob);
-	ceph_put_layout(layout);
+	ceph_put_layout(rcu_dereference_raw(layout));
 	return err;
 }
 

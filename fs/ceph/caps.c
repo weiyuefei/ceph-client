@@ -3410,14 +3410,13 @@ void ceph_handle_caps(struct ceph_mds_session *session,
 	int op, issued;
 	u32 seq, mseq;
 	struct ceph_vino vino;
-	u64 cap_id;
-	u64 size, max_size;
 	u64 tid;
 	u64 inline_version = 0;
 	void *inline_data = NULL;
 	u32  inline_len = 0;
 	void *snaptrace;
 	size_t snaptrace_len;
+	void *pool_ns = NULL;
 	u32 pool_ns_len = 0;
 	void *p, *end;
 
@@ -3432,11 +3431,8 @@ void ceph_handle_caps(struct ceph_mds_session *session,
 	op = le32_to_cpu(h->op);
 	vino.ino = le64_to_cpu(h->ino);
 	vino.snap = CEPH_NOSNAP;
-	cap_id = le64_to_cpu(h->cap_id);
 	seq = le32_to_cpu(h->seq);
 	mseq = le32_to_cpu(h->migrate_seq);
-	size = le64_to_cpu(h->size);
-	max_size = le64_to_cpu(h->max_size);
 
 	snaptrace = h + 1;
 	snaptrace_len = le32_to_cpu(h->snap_trace_len);
@@ -3484,6 +3480,11 @@ void ceph_handle_caps(struct ceph_mds_session *session,
 		ceph_decode_32_safe(&p, end, caller_gid, bad);
 		/* version >= 8 */
 		ceph_decode_32_safe(&p, end, pool_ns_len, bad);
+		if (pool_ns_len > 0) {
+			ceph_decode_need(&p, end, pool_ns_len, bad);
+			pool_ns = p;
+			p += pool_ns_len;
+		}
 	}
 
 	/* lookup ino */
@@ -3500,10 +3501,13 @@ void ceph_handle_caps(struct ceph_mds_session *session,
 		rcu_read_lock();
 		old_layout = rcu_dereference(ci->i_layout);
 		new_layout = !old_layout ||
-			     ceph_compare_layout(old_layout, &h->layout);
+			     ceph_compare_layout(old_layout, &h->layout,
+					     	 pool_ns, pool_ns_len);
 		rcu_read_unlock();
 		if (new_layout)
-			layout = ceph_find_or_create_layout(&h->layout);
+			layout = ceph_find_or_create_layout(&h->layout,
+							    pool_ns,
+							    pool_ns_len);
 	}
 
 	mutex_lock(&session->s_mutex);
@@ -3518,7 +3522,7 @@ void ceph_handle_caps(struct ceph_mds_session *session,
 			cap = ceph_get_cap(mdsc, NULL);
 			cap->cap_ino = vino.ino;
 			cap->queue_release = 1;
-			cap->cap_id = cap_id;
+			cap->cap_id = le64_to_cpu(h->cap_id);
 			cap->mseq = mseq;
 			cap->seq = seq;
 			spin_lock(&session->s_cap_lock);

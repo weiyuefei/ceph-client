@@ -32,9 +32,11 @@ __node_to_layout(struct __file_layout_node *node)
 }
 
 extern struct ceph_file_layout *
-ceph_find_or_create_layout(struct ceph_file_layout_legacy *legacy);
+ceph_find_or_create_layout(struct ceph_file_layout_legacy *legacy,
+			   const char *pool_ns, size_t pool_ns_len);
 extern int ceph_compare_layout(struct ceph_file_layout *exist,
-			       struct ceph_file_layout_legacy *legacy);
+			       struct ceph_file_layout_legacy *legacy,
+			       const char *pool_ns, size_t pool_ns_len);
 extern void ceph_layout_table_cleanup(void);
 
 
