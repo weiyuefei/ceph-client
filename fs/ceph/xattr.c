@@ -3,6 +3,7 @@
 
 #include "super.h"
 #include "mds_client.h"
+#include "layout_table.h"
 
 #include <linux/ceph/decode.h>
 
@@ -55,13 +56,15 @@ struct ceph_vxattr {
 
 static bool ceph_vxattrcb_layout_exists(struct ceph_inode_info *ci)
 {
-	size_t s;
-	char *p = (char *)&ci->i_layout;
-
-	for (s = 0; s < sizeof(ci->i_layout); s++, p++)
-		if (*p)
-			return true;
-	return false;
+	struct ceph_file_layout *layout;
+	bool ret;
+	rcu_read_lock();
+	layout = rcu_dereference(ci->i_layout);
+	ret = layout &&
+	      (layout->stripe_unit > 0 || layout->stripe_count > 0 ||
+	       layout->object_size > 0 || layout->pool_id >= 0);
+	rcu_read_unlock();
+	return ret;
 }
 
 static size_t ceph_vxattrcb_layout(struct ceph_inode_info *ci, char *val,
@@ -70,19 +73,22 @@ static size_t ceph_vxattrcb_layout(struct ceph_inode_info *ci, char *val,
 	int ret;
 	struct ceph_fs_client *fsc = ceph_sb_to_client(ci->vfs_inode.i_sb);
 	struct ceph_osd_client *osdc = &fsc->client->osdc;
-	s64 pool = ci->i_layout.pool_id;
+	struct ceph_file_layout *layout;
 	const char *pool_name;
 	char buf[128];
 
 	dout("ceph_vxattrcb_layout %p\n", &ci->vfs_inode);
+	layout = ceph_try_get_layout(ci->i_layout);
+	BUG_ON(!layout);
+
 	down_read(&osdc->map_sem);
-	pool_name = ceph_pg_pool_name_by_id(osdc->osdmap, pool);
+	pool_name = ceph_pg_pool_name_by_id(osdc->osdmap, layout->pool_id);
 	if (pool_name) {
 		size_t len = strlen(pool_name);
 		ret = snprintf(buf, sizeof(buf),
 		"stripe_unit=%u stripe_count=%u object_size=%u pool=",
-		ci->i_layout.stripe_unit, ci->i_layout.stripe_count,
-	        ci->i_layout.object_size);
+		layout->stripe_unit, layout->stripe_count,
+	        layout->object_size);
 		if (!size) {
 			ret += len;
 		} else if (ret + len > size) {
@@ -95,8 +101,8 @@ static size_t ceph_vxattrcb_layout(struct ceph_inode_info *ci, char *val,
 	} else {
 		ret = snprintf(buf, sizeof(buf),
 		"stripe_unit=%u stripe_count=%u object_size=%u pool=%lld",
-		ci->i_layout.stripe_unit, ci->i_layout.stripe_count,
-	        ci->i_layout.object_size, (unsigned long long)pool);
+		layout->stripe_unit, layout->stripe_count,
+	        layout->object_size, (unsigned long long)layout->pool_id);
 		if (size) {
 			if (ret <= size)
 				memcpy(val, buf, ret);
@@ -105,25 +111,38 @@ static size_t ceph_vxattrcb_layout(struct ceph_inode_info *ci, char *val,
 		}
 	}
 	up_read(&osdc->map_sem);
+	ceph_put_layout(layout);
+
 	return ret;
 }
+
+#define I_LAYOUT_FIELD_VALUE(field)		\
+	u32 value = 0;				\
+ 	struct ceph_file_layout *layout;	\
+ 	rcu_read_lock();			\
+	layout = rcu_dereference(ci->i_layout);	\
+	if (layout)				\
+		value = layout->field;		\
+	rcu_read_unlock();			\
+	return snprintf(val, size, "%u", value);
+
 
 static size_t ceph_vxattrcb_layout_stripe_unit(struct ceph_inode_info *ci,
 					       char *val, size_t size)
 {
-	return snprintf(val, size, "%u", ci->i_layout.stripe_unit);
+	I_LAYOUT_FIELD_VALUE(stripe_unit);
 }
 
 static size_t ceph_vxattrcb_layout_stripe_count(struct ceph_inode_info *ci,
 						char *val, size_t size)
 {
-	return snprintf(val, size, "%u", ci->i_layout.stripe_count);
+	I_LAYOUT_FIELD_VALUE(stripe_count);
 }
 
 static size_t ceph_vxattrcb_layout_object_size(struct ceph_inode_info *ci,
 					       char *val, size_t size)
 {
-	return snprintf(val, size, "%u", ci->i_layout.object_size);
+	I_LAYOUT_FIELD_VALUE(object_size);
 }
 
 static size_t ceph_vxattrcb_layout_pool(struct ceph_inode_info *ci,
@@ -132,16 +151,21 @@ static size_t ceph_vxattrcb_layout_pool(struct ceph_inode_info *ci,
 	int ret;
 	struct ceph_fs_client *fsc = ceph_sb_to_client(ci->vfs_inode.i_sb);
 	struct ceph_osd_client *osdc = &fsc->client->osdc;
-	s64 pool = ci->i_layout.pool_id;
+	struct ceph_file_layout *layout;
 	const char *pool_name;
 
+	layout = ceph_try_get_layout(ci->i_layout);
+	BUG_ON(!layout);
+
 	down_read(&osdc->map_sem);
-	pool_name = ceph_pg_pool_name_by_id(osdc->osdmap, pool);
+	pool_name = ceph_pg_pool_name_by_id(osdc->osdmap, layout->pool_id);
 	if (pool_name)
 		ret = snprintf(val, size, "%s", pool_name);
 	else
-		ret = snprintf(val, size, "%lld", (unsigned long long)pool);
+		ret = snprintf(val, size, "%lld",
+				(unsigned long long)layout->pool_id);
 	up_read(&osdc->map_sem);
+	ceph_put_layout(layout);
 	return ret;
 }
 

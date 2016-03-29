@@ -11,6 +11,7 @@
 #include "super.h"
 #include "mds_client.h"
 #include "cache.h"
+#include "layout_table.h"
 #include <linux/ceph/decode.h>
 #include <linux/ceph/messenger.h>
 
@@ -2752,7 +2753,7 @@ static void invalidate_aliases(struct inode *inode)
  */
 static void handle_cap_grant(struct ceph_mds_client *mdsc,
 			     struct inode *inode, struct ceph_mds_caps *grant,
-			     u64 inline_version,
+			     struct ceph_file_layout **pfl, u64 inline_version,
 			     void *inline_data, int inline_len,
 			     struct ceph_buffer *xattr_buf,
 			     struct ceph_mds_session *session,
@@ -2876,11 +2877,7 @@ static void handle_cap_grant(struct ceph_mds_client *mdsc,
 
 	if (newcaps & (CEPH_CAP_ANY_FILE_RD | CEPH_CAP_ANY_FILE_WR)) {
 		/* file layout may have changed */
-		s64 old_pool = ci->i_layout.pool_id;
-		ceph_file_layout_from_legacy(&ci->i_layout, &grant->layout);
-		ci->i_pool_ns_len = pool_ns_len;
-		if (ci->i_layout.pool_id != old_pool)
-			ci->i_ceph_flags &= ~CEPH_I_POOL_PERM;
+		__ceph_inode_set_layout(ci, pfl);
 
 		/* size/truncate_seq? */
 		queue_trunc = ceph_fill_file_size(inode, issued,
@@ -3407,7 +3404,8 @@ void ceph_handle_caps(struct ceph_mds_session *session,
 	struct ceph_cap *cap;
 	struct ceph_mds_caps *h;
 	struct ceph_mds_cap_peer *peer = NULL;
-	struct ceph_snap_realm *realm;
+	struct ceph_snap_realm *realm = NULL;
+	struct ceph_file_layout *layout = NULL;
 	int mds = session->s_mds;
 	int op, issued;
 	u32 seq, mseq;
@@ -3494,6 +3492,20 @@ void ceph_handle_caps(struct ceph_mds_session *session,
 	dout(" op %s ino %llx.%llx inode %p\n", ceph_cap_op_name(op), vino.ino,
 	     vino.snap, inode);
 
+	if (inode &&
+	    (op == CEPH_CAP_OP_GRANT || op == CEPH_CAP_OP_REVOKE ||
+	     op == CEPH_CAP_OP_IMPORT)) {
+		struct ceph_file_layout *old_layout;
+		bool new_layout;
+		rcu_read_lock();
+		old_layout = rcu_dereference(ci->i_layout);
+		new_layout = !old_layout ||
+			     ceph_compare_layout(old_layout, &h->layout);
+		rcu_read_unlock();
+		if (new_layout)
+			layout = ceph_find_or_create_layout(&h->layout);
+	}
+
 	mutex_lock(&session->s_mutex);
 	session->s_seq++;
 	dout(" mds%d seq %lld cap seq %u\n", session->s_mds, session->s_seq,
@@ -3529,7 +3541,6 @@ void ceph_handle_caps(struct ceph_mds_session *session,
 		goto done_unlocked;
 
 	case CEPH_CAP_OP_IMPORT:
-		realm = NULL;
 		if (snaptrace_len) {
 			down_write(&mdsc->snap_rwsem);
 			ceph_update_snap_trace(mdsc, snaptrace,
@@ -3541,7 +3552,7 @@ void ceph_handle_caps(struct ceph_mds_session *session,
 		}
 		handle_cap_import(mdsc, inode, h, peer, session,
 				  &cap, &issued);
-		handle_cap_grant(mdsc, inode, h,
+		handle_cap_grant(mdsc, inode, h, &layout,
 				 inline_version, inline_data, inline_len,
 				 msg->middle, session, cap, issued,
 				 pool_ns_len);
@@ -3566,7 +3577,7 @@ void ceph_handle_caps(struct ceph_mds_session *session,
 	case CEPH_CAP_OP_GRANT:
 		__ceph_caps_issued(ci, &issued);
 		issued |= __ceph_caps_dirty(ci);
-		handle_cap_grant(mdsc, inode, h,
+		handle_cap_grant(mdsc, inode, h, &layout,
 				 inline_version, inline_data, inline_len,
 				 msg->middle, session, cap, issued,
 				 pool_ns_len);
@@ -3600,6 +3611,7 @@ done:
 	mutex_unlock(&session->s_mutex);
 done_unlocked:
 	iput(inode);
+	ceph_put_layout(layout);
 	return;
 
 bad:

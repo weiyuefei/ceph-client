@@ -285,7 +285,7 @@ struct ceph_inode_info {
 	atomic64_t i_complete_seq[2];
 
 	struct ceph_dir_layout i_dir_layout;
-	struct ceph_file_layout i_layout;
+	struct ceph_file_layout __rcu *i_layout;
 	size_t i_pool_ns_len;
 	char *i_symlink;
 
@@ -789,6 +789,8 @@ extern int ceph_setattr(struct dentry *dentry, struct iattr *attr);
 extern int ceph_getattr(struct vfsmount *mnt, struct dentry *dentry,
 			struct kstat *stat);
 
+extern void __ceph_inode_set_layout(struct ceph_inode_info *ci,
+				    struct ceph_file_layout **pfl);
 /* xattr.c */
 extern int ceph_setxattr(struct dentry *, const char *, const void *,
 			 size_t, int);
@@ -993,6 +995,7 @@ extern void ceph_fs_debugfs_cleanup(struct ceph_fs_client *client);
 /* osdc.c */
 extern struct ceph_osd_request *ceph_osdc_new_request(struct ceph_osd_client *,
 					struct ceph_inode_info *ci,
+					struct ceph_file_layout *layout,
 					struct ceph_snap_context *snapc,
 					u64 offset, u64 *len,
 					unsigned int which, int num_ops,

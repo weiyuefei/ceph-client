@@ -44,6 +44,7 @@ static int calc_layout(struct ceph_file_layout *layout, u64 off, u64 *plen,
  */
 struct ceph_osd_request *ceph_osdc_new_request(struct ceph_osd_client *osdc,
 					       struct ceph_inode_info *ci,
+					       struct ceph_file_layout *layout,
 					       struct ceph_snap_context *snapc,
 					       u64 off, u64 *plen,
 					       unsigned int which, int num_ops,
@@ -53,31 +54,35 @@ struct ceph_osd_request *ceph_osdc_new_request(struct ceph_osd_client *osdc,
 					       bool use_mempool)
 {
 	struct ceph_osd_request *req;
-	struct ceph_file_layout *layout = &ci->i_layout;
 	u64 objnum = 0;
 	u64 objoff = 0;
 	u64 objlen = 0;
-	int r;
+	int ret;
+	bool release = false;
 
 	BUG_ON(opcode != CEPH_OSD_OP_READ && opcode != CEPH_OSD_OP_WRITE &&
 	       opcode != CEPH_OSD_OP_ZERO && opcode != CEPH_OSD_OP_TRUNCATE &&
 	       opcode != CEPH_OSD_OP_CREATE && opcode != CEPH_OSD_OP_DELETE);
 
+	if (!layout) {
+		layout = ceph_try_get_layout(ci->i_layout);
+		BUG_ON(!layout);
+		release = true;
+	}
+
 	req = ceph_osdc_alloc_request(osdc, snapc, num_ops, use_mempool,
 					GFP_NOFS);
 	if (!req) {
-		r = -ENOMEM;
-		goto out_err;
+		ret = -ENOMEM;
+		goto out;
 	}
 
 	req->r_flags = flags;
 
 	/* calculate max write size */
-	r = calc_layout(layout, off, plen, &objnum, &objoff, &objlen);
-	if (r < 0) {
-		ceph_osdc_put_request(req);
-		goto out_err;
-	}
+	ret = calc_layout(layout, off, plen, &objnum, &objoff, &objlen);
+	if (ret < 0)
+		goto out;
 
 	if (opcode == CEPH_OSD_OP_CREATE || opcode == CEPH_OSD_OP_DELETE) {
 		osd_req_op_init(req, which, opcode, 0);
@@ -102,12 +107,15 @@ struct ceph_osd_request *ceph_osdc_new_request(struct ceph_osd_client *osdc,
 	snprintf(req->r_base_oid.name, sizeof(req->r_base_oid.name),
 		 "%llx.%08llx", ci->i_vino.ino, objnum);
 	req->r_base_oid.name_len = strlen(req->r_base_oid.name);
-
-	ceph_put_layout(layout);
+out:
+	if (release)
+		ceph_put_layout(layout);
+	if (ret < 0) {
+		if (req)
+			ceph_osdc_put_request(req);
+		req = ERR_PTR(ret);
+	}
 	return req;
-out_err:
-	ceph_put_layout(layout);
-	return ERR_PTR(r);
 }
 
 /*
@@ -124,7 +132,7 @@ int ceph_osdc_readpages(struct ceph_osd_client *osdc,
 
 	dout("readpages on ino %llx.%llx on %llu~%llu\n",
 	     ci->i_vino.ino, ci->i_vino.snap, off, *plen);
-	req = ceph_osdc_new_request(osdc, ci, NULL, off, plen, 0, 1,
+	req = ceph_osdc_new_request(osdc, ci, NULL, NULL, off, plen, 0, 1,
 				    CEPH_OSD_OP_READ, CEPH_OSD_FLAG_READ,
 				    truncate_seq, truncate_size, false);
 	if (IS_ERR(req))
@@ -165,7 +173,7 @@ int ceph_osdc_writepages(struct ceph_osd_client *osdc,
 	int page_align = off & ~PAGE_MASK;
 
 	BUG_ON(ci->i_vino.snap != CEPH_NOSNAP);	/* snapshots aren't writeable */
-	req = ceph_osdc_new_request(osdc, ci, snapc, off, &len, 0, 1,
+	req = ceph_osdc_new_request(osdc, ci, NULL, snapc, off, &len, 0, 1,
 				    CEPH_OSD_OP_WRITE,
 				    CEPH_OSD_FLAG_ONDISK | CEPH_OSD_FLAG_WRITE,
 				    truncate_seq, truncate_size, true);

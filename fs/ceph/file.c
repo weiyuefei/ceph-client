@@ -12,6 +12,7 @@
 #include "super.h"
 #include "mds_client.h"
 #include "cache.h"
+#include "layout_table.h"
 
 /*
  * Ceph file operations
@@ -822,8 +823,8 @@ ceph_direct_read_write(struct kiocb *iocb, struct iov_iter *iter,
 		ssize_t len;
 
 		vino = ceph_vino(inode);
-		req = ceph_osdc_new_request(&fsc->client->osdc, ci, snapc,
-					    pos, &size, 0,
+		req = ceph_osdc_new_request(&fsc->client->osdc, ci,
+					    NULL, snapc, pos, &size, 0,
 					    /*include a 'startsync' command*/
 					    write ? 2 : 1,
 					    write ? CEPH_OSD_OP_WRITE :
@@ -1017,8 +1018,8 @@ ceph_sync_write(struct kiocb *iocb, struct iov_iter *from, loff_t pos,
 		int n;
 
 		vino = ceph_vino(inode);
-		req = ceph_osdc_new_request(&fsc->client->osdc, ci, snapc,
-					    pos, &len, 0, 1,
+		req = ceph_osdc_new_request(&fsc->client->osdc, ci,
+					    NULL, snapc, pos, &len, 0, 1,
 					    CEPH_OSD_OP_WRITE, flags,
 					    ci->i_truncate_seq,
 					    ci->i_truncate_size,
@@ -1509,12 +1510,10 @@ static int ceph_zero_partial_object(struct inode *inode,
 		op = CEPH_OSD_OP_ZERO;
 	}
 
-	req = ceph_osdc_new_request(&fsc->client->osdc, ci, NULL,
-					offset, length,
-					0, 1, op,
-					CEPH_OSD_FLAG_WRITE |
-					CEPH_OSD_FLAG_ONDISK,
-					0, 0, false);
+	req = ceph_osdc_new_request(&fsc->client->osdc, ci, NULL, NULL,
+				    offset, length, 0, 1, op,
+				    CEPH_OSD_FLAG_WRITE | CEPH_OSD_FLAG_ONDISK,
+				    0, 0, false);
 	if (IS_ERR(req)) {
 		ret = PTR_ERR(req);
 		goto out;
@@ -1539,12 +1538,13 @@ static int ceph_zero_objects(struct inode *inode, loff_t offset, loff_t length)
 {
 	int ret = 0;
 	struct ceph_inode_info *ci = ceph_inode(inode);
-	s32 stripe_unit = ci->i_layout.stripe_unit;
-	s32 stripe_count = ci->i_layout.stripe_count;
-	s32 object_size = ci->i_layout.object_size;
-	u64 object_set_size = object_size * stripe_count;
-	u64 nearly, t;
+	struct ceph_file_layout *fl;
+	u64 object_set_size, nearly, t;
 
+	fl = ceph_try_get_layout(ci->i_layout);
+	BUG_ON(!fl);
+
+	object_set_size = fl->object_size * fl->stripe_count;
 	/* round offset up to next period boundary */
 	nearly = offset + object_set_size - 1;
 	t = nearly;
@@ -1554,18 +1554,18 @@ static int ceph_zero_objects(struct inode *inode, loff_t offset, loff_t length)
 		loff_t size = length;
 		ret = ceph_zero_partial_object(inode, offset, &size);
 		if (ret < 0)
-			return ret;
+			goto out;
 		offset += size;
 		length -= size;
 	}
 	while (length >= object_set_size) {
 		int i;
 		loff_t pos = offset;
-		for (i = 0; i < stripe_count; ++i) {
+		for (i = 0; i < fl->stripe_count; ++i) {
 			ret = ceph_zero_partial_object(inode, pos, NULL);
 			if (ret < 0)
-				return ret;
-			pos += stripe_unit;
+				goto out;
+			pos += fl->stripe_unit;
 		}
 		offset += object_set_size;
 		length -= object_set_size;
@@ -1574,10 +1574,12 @@ static int ceph_zero_objects(struct inode *inode, loff_t offset, loff_t length)
 		loff_t size = length;
 		ret = ceph_zero_partial_object(inode, offset, &size);
 		if (ret < 0)
-			return ret;
+			goto out;
 		offset += size;
 		length -= size;
 	}
+out:
+	ceph_put_layout(fl);
 	return ret;
 }
 

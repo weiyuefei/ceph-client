@@ -3,6 +3,7 @@
 
 #include "super.h"
 #include "mds_client.h"
+#include "layout_table.h"
 #include "ioctl.h"
 
 
@@ -21,11 +22,15 @@ static long ceph_ioctl_get_layout(struct file *file, void __user *arg)
 
 	err = ceph_do_getattr(file_inode(file), CEPH_STAT_CAP_LAYOUT, false);
 	if (!err) {
-		l.stripe_unit = ci->i_layout.stripe_unit;
-		l.stripe_count = ci->i_layout.stripe_count;
-		l.object_size = ci->i_layout.object_size;
-		l.data_pool = ci->i_layout.pool_id;
+		struct ceph_file_layout *layout =
+				ceph_try_get_layout(ci->i_layout);
+		BUG_ON(!layout);
+		l.stripe_unit = layout->stripe_unit;
+		l.stripe_count = layout->stripe_count;
+		l.object_size = layout->object_size;
+		l.data_pool = layout->pool_id;
 		l.preferred_osd = (s32)-1;
+		ceph_put_layout(layout);
 		if (copy_to_user(arg, &l, sizeof(l)))
 			return -EFAULT;
 	}
@@ -65,9 +70,9 @@ static long ceph_ioctl_set_layout(struct file *file, void __user *arg)
 	struct inode *inode = file_inode(file);
 	struct ceph_mds_client *mdsc = ceph_sb_to_client(inode->i_sb)->mdsc;
 	struct ceph_mds_request *req;
-	struct ceph_ioctl_layout l;
+	struct ceph_ioctl_layout l, nl;
+	struct ceph_file_layout *layout;
 	struct ceph_inode_info *ci = ceph_inode(file_inode(file));
-	struct ceph_ioctl_layout nl;
 	int err;
 
 	if (copy_from_user(&l, arg, sizeof(l)))
@@ -77,24 +82,28 @@ static long ceph_ioctl_set_layout(struct file *file, void __user *arg)
 	err = ceph_do_getattr(file_inode(file), CEPH_STAT_CAP_LAYOUT, false);
 	if (err)
 		return err;
+				
+	layout = ceph_try_get_layout(ci->i_layout);
+	BUG_ON(!layout);
 
 	memset(&nl, 0, sizeof(nl));
 	if (l.stripe_count)
 		nl.stripe_count = l.stripe_count;
 	else
-		nl.stripe_count = ci->i_layout.stripe_count;
+		nl.stripe_count = layout->stripe_count;
 	if (l.stripe_unit)
 		nl.stripe_unit = l.stripe_unit;
 	else
-		nl.stripe_unit = ci->i_layout.stripe_unit;
+		nl.stripe_unit = layout->stripe_unit;
 	if (l.object_size)
 		nl.object_size = l.object_size;
 	else
-		nl.object_size = ci->i_layout.object_size;
+		nl.object_size = layout->object_size;
 	if (l.data_pool)
 		nl.data_pool = l.data_pool;
 	else
-		nl.data_pool = ci->i_layout.pool_id;
+		nl.data_pool = layout->pool_id;
+	ceph_put_layout(layout);
 
 	/* this is obsolete, and always -1 */
 	nl.preferred_osd = le64_to_cpu(-1);
@@ -184,6 +193,7 @@ static long ceph_ioctl_get_dataloc(struct file *file, void __user *arg)
 		&ceph_sb_to_client(inode->i_sb)->client->osdc;
 	struct ceph_object_locator oloc;
 	struct ceph_object_id oid;
+	struct ceph_file_layout *layout;
 	u64 len = 1, olen;
 	u64 tmp;
 	struct ceph_pg pgid;
@@ -193,17 +203,21 @@ static long ceph_ioctl_get_dataloc(struct file *file, void __user *arg)
 	if (copy_from_user(&dl, arg, sizeof(dl)))
 		return -EFAULT;
 
+	layout = ceph_try_get_layout(ci->i_layout);
+	BUG_ON(!layout);
+
 	down_read(&osdc->map_sem);
-	r = ceph_calc_file_object_mapping(&ci->i_layout, dl.file_offset, len,
+	r = ceph_calc_file_object_mapping(layout, dl.file_offset, len,
 					  &dl.object_no, &dl.object_offset,
 					  &olen);
 	if (r < 0) {
 		up_read(&osdc->map_sem);
-		return -EIO;
+		r = -EIO;
+		goto out;
 	}
 	dl.file_offset -= dl.object_offset;
-	dl.object_size = ci->i_layout.object_size;
-	dl.block_size = ci->i_layout.stripe_unit;
+	dl.object_size = layout->object_size;
+	dl.block_size = layout->stripe_unit;
 
 	/* block_offset = object_offset % block_size */
 	tmp = dl.object_offset;
@@ -212,13 +226,13 @@ static long ceph_ioctl_get_dataloc(struct file *file, void __user *arg)
 	snprintf(dl.object_name, sizeof(dl.object_name), "%llx.%08llx",
 		 ceph_ino(inode), dl.object_no);
 
-	oloc.pool = ci->i_layout.pool_id;
+	oloc.pool = layout->pool_id;
 	ceph_oid_set_name(&oid, dl.object_name);
 
 	r = ceph_oloc_oid_to_pg(osdc->osdmap, &oloc, &oid, &pgid);
 	if (r < 0) {
 		up_read(&osdc->map_sem);
-		return r;
+		goto out;
 	}
 
 	dl.osd = ceph_calc_pg_primary(osdc->osdmap, pgid);
@@ -234,9 +248,12 @@ static long ceph_ioctl_get_dataloc(struct file *file, void __user *arg)
 
 	/* send result back to user */
 	if (copy_to_user(arg, &dl, sizeof(dl)))
-		return -EFAULT;
-
-	return 0;
+		r = -EFAULT;
+	else
+		r = 0;
+out:
+	ceph_put_layout(layout);
+	return r;
 }
 
 static long ceph_ioctl_lazyio(struct file *file)

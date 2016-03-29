@@ -14,6 +14,7 @@
 #include "super.h"
 #include "mds_client.h"
 #include "cache.h"
+#include "layout_table.h"
 #include <linux/ceph/decode.h>
 
 /*
@@ -396,6 +397,7 @@ struct inode *ceph_alloc_inode(struct super_block *sb)
 	ci->i_symlink = NULL;
 
 	memset(&ci->i_dir_layout, 0, sizeof(ci->i_dir_layout));
+	RCU_INIT_POINTER(ci->i_layout, NULL);
 	ci->i_pool_ns_len = 0;
 
 	ci->i_fragtree = RB_ROOT;
@@ -518,6 +520,8 @@ void ceph_destroy_inode(struct inode *inode)
 		ceph_buffer_put(ci->i_xattrs.blob);
 	if (ci->i_xattrs.prealloc_blob)
 		ceph_buffer_put(ci->i_xattrs.prealloc_blob);
+
+	ceph_put_layout(rcu_dereference_raw(ci->i_layout));
 
 	call_rcu(&inode->i_rcu, ceph_i_callback);
 }
@@ -660,6 +664,20 @@ void ceph_fill_file_time(struct inode *inode, int issued,
 		     inode, time_warp_seq, ci->i_time_warp_seq);
 }
 
+void __ceph_inode_set_layout(struct ceph_inode_info *ci,
+			     struct ceph_file_layout **pfl)
+{
+	struct ceph_file_layout *old_fl;
+	if (*pfl == NULL)
+		return;
+	old_fl = rcu_dereference_protected(ci->i_layout,
+				lockdep_is_held(&ci->i_ceph_lock));
+	rcu_assign_pointer(ci->i_layout, *pfl);
+	if (*pfl != old_fl)
+		ci->i_ceph_flags &= ~CEPH_I_POOL_PERM;
+	*pfl = old_fl;
+}
+
 /*
  * Populate an inode based on info from mds.  May be called on new or
  * existing inodes.
@@ -676,6 +694,7 @@ static int fill_inode(struct inode *inode, struct page *locked_page,
 	struct ceph_inode_info *ci = ceph_inode(inode);
 	int issued = 0, implemented, new_issued;
 	struct timespec mtime, atime, ctime;
+	struct ceph_file_layout *layout = NULL;
 	struct ceph_buffer *xattr_blob = NULL;
 	struct ceph_cap *new_cap = NULL;
 	int err = 0;
@@ -702,6 +721,18 @@ static int fill_inode(struct inode *inode, struct page *locked_page,
 		if (!xattr_blob)
 			pr_err("fill_inode ENOMEM xattr blob %d bytes\n",
 			       iinfo->xattr_len);
+	}
+
+	{
+		struct ceph_file_layout *old_layout;
+		bool new_layout;
+		rcu_read_lock();
+		old_layout = rcu_dereference(ci->i_layout);
+		new_layout = !old_layout ||
+			     ceph_compare_layout(old_layout, &info->layout);
+		rcu_read_unlock();
+		if (new_layout)
+			layout = ceph_find_or_create_layout(&info->layout);
 	}
 
 	spin_lock(&ci->i_ceph_lock);
@@ -758,11 +789,8 @@ static int fill_inode(struct inode *inode, struct page *locked_page,
 
 	if (new_version ||
 	    (new_issued & (CEPH_CAP_ANY_FILE_RD | CEPH_CAP_ANY_FILE_WR))) {
-		s64 old_pool = ci->i_layout.pool_id;
-		ceph_file_layout_from_legacy(&ci->i_layout, &info->layout);
+		__ceph_inode_set_layout(ci, &layout);
 		ci->i_pool_ns_len = iinfo->pool_ns_len;
-		if (ci->i_layout.pool_id != old_pool)
-			ci->i_ceph_flags &= ~CEPH_I_POOL_PERM;
 
 		queue_trunc = ceph_fill_file_size(inode, issued,
 					le32_to_cpu(info->truncate_seq),
@@ -926,6 +954,7 @@ out:
 		ceph_put_cap(mdsc, new_cap);
 	if (xattr_blob)
 		ceph_buffer_put(xattr_blob);
+	ceph_put_layout(layout);
 	return err;
 }
 

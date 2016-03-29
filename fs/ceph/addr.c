@@ -12,6 +12,7 @@
 #include "super.h"
 #include "mds_client.h"
 #include "cache.h"
+#include "layout_table.h"
 #include <linux/ceph/osd_client.h>
 
 /*
@@ -339,7 +340,7 @@ static int start_read(struct inode *inode, struct list_head *page_list, int max)
 	dout("start_read %p nr_pages %d is %lld~%lld\n", inode, nr_pages,
 	     off, len);
 	vino = ceph_vino(inode);
-	req = ceph_osdc_new_request(osdc, ci, NULL, off, &len, 0, 1,
+	req = ceph_osdc_new_request(osdc, ci, NULL, NULL, off, &len, 0, 1,
 				    CEPH_OSD_OP_READ, CEPH_OSD_FLAG_READ,
 				    ci->i_truncate_seq, ci->i_truncate_size,
 				    false);
@@ -690,6 +691,7 @@ static int ceph_writepages_start(struct address_space *mapping,
 	int should_loop = 1;
 	pgoff_t max_pages = 0, max_pages_ever = 0;
 	struct ceph_snap_context *snapc = NULL, *last_snapc = NULL, *pgsnapc;
+	struct ceph_file_layout *layout;
 	struct pagevec pvec;
 	int done = 0;
 	int rc = 0;
@@ -741,6 +743,9 @@ static int ceph_writepages_start(struct address_space *mapping,
 		dout(" not cyclic, %lu to %lu\n", start, end);
 	}
 	index = start;
+
+	layout = ceph_try_get_layout(ci->i_layout);
+	BUG_ON(!layout);
 
 retry:
 	/* find oldest snap context with dirty data */
@@ -872,7 +877,7 @@ get_more_pages:
 				offset = (u64)page_offset(page);
 				len = wsize;
 
-				rc = ceph_calc_file_object_mapping(&ci->i_layout,
+				rc = ceph_calc_file_object_mapping(layout,
 								offset, len,
 								&objnum, &objoff,
 								&len);
@@ -956,7 +961,7 @@ new_request:
 		len = wsize;
 
 		req = ceph_osdc_new_request(&fsc->client->osdc,
-					    ci, snapc,
+					    ci, layout, snapc,
 					    offset, &len, 0, num_ops,
 					    CEPH_OSD_OP_WRITE,
 					    CEPH_OSD_FLAG_WRITE |
@@ -965,7 +970,7 @@ new_request:
 					    false);
 		if (IS_ERR(req)) {
 			req = ceph_osdc_new_request(&fsc->client->osdc,
-						    ci, snapc,
+						    ci, layout, snapc,
 						    offset, &len, 0,
 						    min(num_ops,
 							CEPH_OSD_SLAB_OPS),
@@ -1602,7 +1607,7 @@ int ceph_uninline_data(struct file *filp, struct page *locked_page)
 	}
 
 	req = ceph_osdc_new_request(&fsc->client->osdc,
-				    ci, NULL, 0, &len, 0, 1,
+				    ci, NULL, NULL, 0, &len, 0, 1,
 				    CEPH_OSD_OP_CREATE,
 				    CEPH_OSD_FLAG_ONDISK | CEPH_OSD_FLAG_WRITE,
 				    0, 0, false);
@@ -1620,7 +1625,7 @@ int ceph_uninline_data(struct file *filp, struct page *locked_page)
 		goto out;
 
 	req = ceph_osdc_new_request(&fsc->client->osdc,
-				    ci, NULL, 0, &len, 1, 3,
+				    ci, NULL, NULL, 0, &len, 1, 3,
 				    CEPH_OSD_OP_WRITE,
 				    CEPH_OSD_FLAG_ONDISK | CEPH_OSD_FLAG_WRITE,
 				    ci->i_truncate_seq, ci->i_truncate_size,
@@ -1697,7 +1702,8 @@ enum {
 	POOL_WRITE	= 2,
 };
 
-static int __ceph_pool_perm_get(struct ceph_inode_info *ci, s64 pool)
+static int __ceph_pool_perm_get(struct ceph_inode_info *ci,
+				struct ceph_file_layout *layout)
 {
 	struct ceph_fs_client *fsc = ceph_inode_to_client(&ci->vfs_inode);
 	struct ceph_mds_client *mdsc = fsc->mdsc;
@@ -1711,9 +1717,9 @@ static int __ceph_pool_perm_get(struct ceph_inode_info *ci, s64 pool)
 	p = &mdsc->pool_perm_tree.rb_node;
 	while (*p) {
 		perm = rb_entry(*p, struct ceph_pool_perm, node);
-		if (pool < perm->pool)
+		if (layout->pool_id < perm->pool)
 			p = &(*p)->rb_left;
-		else if (pool > perm->pool)
+		else if (layout->pool_id > perm->pool)
 			p = &(*p)->rb_right;
 		else {
 			have = perm->perm;
@@ -1724,16 +1730,16 @@ static int __ceph_pool_perm_get(struct ceph_inode_info *ci, s64 pool)
 	if (*p)
 		goto out;
 
-	dout("__ceph_pool_perm_get pool %lld no perm cached\n", pool);
+	dout("__ceph_pool_perm_get pool %lld no perm cached\n", layout->pool_id);
 
 	down_write(&mdsc->pool_perm_rwsem);
 	parent = NULL;
 	while (*p) {
 		parent = *p;
 		perm = rb_entry(parent, struct ceph_pool_perm, node);
-		if (pool < perm->pool)
+		if (layout->pool_id < perm->pool)
 			p = &(*p)->rb_left;
-		else if (pool > perm->pool)
+		else if (layout->pool_id > perm->pool)
 			p = &(*p)->rb_right;
 		else {
 			have = perm->perm;
@@ -1754,7 +1760,7 @@ static int __ceph_pool_perm_get(struct ceph_inode_info *ci, s64 pool)
 
 	rd_req->r_flags = CEPH_OSD_FLAG_READ;
 	osd_req_op_init(rd_req, 0, CEPH_OSD_OP_STAT, 0);
-	rd_req->r_base_oloc.pool = pool;
+	rd_req->r_base_oloc.pool = layout->pool_id;
 	snprintf(rd_req->r_base_oid.name, sizeof(rd_req->r_base_oid.name),
 		 "%llx.00000000", ci->i_vino.ino);
 	rd_req->r_base_oid.name_len = strlen(rd_req->r_base_oid.name);
@@ -1769,7 +1775,7 @@ static int __ceph_pool_perm_get(struct ceph_inode_info *ci, s64 pool)
 	wr_req->r_flags = CEPH_OSD_FLAG_WRITE |
 			  CEPH_OSD_FLAG_ACK | CEPH_OSD_FLAG_ONDISK;
 	osd_req_op_init(wr_req, 0, CEPH_OSD_OP_CREATE, CEPH_OSD_OP_FLAG_EXCL);
-	wr_req->r_base_oloc.pool = pool;
+	wr_req->r_base_oloc.pool = layout->pool_id;
 	wr_req->r_base_oid = rd_req->r_base_oid;
 
 	/* one page should be large enough for STAT data */
@@ -1812,7 +1818,7 @@ static int __ceph_pool_perm_get(struct ceph_inode_info *ci, s64 pool)
 		goto out_unlock;
 	}
 
-	perm->pool = pool;
+	perm->pool = layout->pool_id;
 	perm->perm = have;
 	rb_link_node(&perm->node, parent, p);
 	rb_insert_color(&perm->node, &mdsc->pool_perm_tree);
@@ -1827,13 +1833,13 @@ out_unlock:
 out:
 	if (!err)
 		err = have;
-	dout("__ceph_pool_perm_get pool %lld result = %d\n", pool, err);
+	dout("__ceph_pool_perm_get pool %lld result = %d\n", layout->pool_id, err);
 	return err;
 }
 
 int ceph_pool_perm_check(struct ceph_inode_info *ci, int need)
 {
-	s64 pool;
+	struct ceph_file_layout *layout;
 	int ret, flags;
 
 	/* does not support pool namespace yet */
@@ -1846,24 +1852,22 @@ int ceph_pool_perm_check(struct ceph_inode_info *ci, int need)
 
 	spin_lock(&ci->i_ceph_lock);
 	flags = ci->i_ceph_flags;
-	pool = ci->i_layout.pool_id;
 	spin_unlock(&ci->i_ceph_lock);
 check:
 	if (flags & CEPH_I_POOL_PERM) {
 		if ((need & CEPH_CAP_FILE_RD) && !(flags & CEPH_I_POOL_RD)) {
-			dout("ceph_pool_perm_check pool %lld no read perm\n",
-			     pool);
 			return -EPERM;
 		}
 		if ((need & CEPH_CAP_FILE_WR) && !(flags & CEPH_I_POOL_WR)) {
-			dout("ceph_pool_perm_check pool %lld no write perm\n",
-			     pool);
 			return -EPERM;
 		}
 		return 0;
 	}
 
-	ret = __ceph_pool_perm_get(ci, pool);
+	layout = ceph_try_get_layout(ci->i_layout);
+	BUG_ON(!layout);
+	ret = __ceph_pool_perm_get(ci, layout);
+	ceph_put_layout(layout);
 	if (ret < 0)
 		return ret;
 
@@ -1874,10 +1878,9 @@ check:
 		flags |= CEPH_I_POOL_WR;
 
 	spin_lock(&ci->i_ceph_lock);
-	if (pool == ci->i_layout.pool_id) {
+	if (layout == rcu_dereference_raw(ci->i_layout)) {
 		ci->i_ceph_flags = flags;
         } else {
-		pool = ci->i_layout.pool_id;
 		flags = ci->i_ceph_flags;
 	}
 	spin_unlock(&ci->i_ceph_lock);
