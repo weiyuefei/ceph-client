@@ -36,6 +36,7 @@ void ceph_file_layout_from_legacy(struct ceph_file_layout *fl,
 	fl->pool_id = le64_to_cpu(legacy->fl_pg_pool);
 	if (fl->pool_id == 0)
 		fl->pool_id = -1;
+	fl->pool_ns_len = 0;
 }
 EXPORT_SYMBOL(ceph_file_layout_from_legacy);
 

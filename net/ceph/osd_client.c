@@ -372,6 +372,7 @@ struct ceph_osd_request *ceph_osdc_alloc_request(struct ceph_osd_client *osdc,
 	INIT_LIST_HEAD(&req->r_osd_item);
 
 	req->r_base_oloc.pool = -1;
+	req->r_base_oloc.pool_ns = req->r_pool_ns_buf;
 	req->r_target_oloc.pool = -1;
 
 	msg_size = OSD_OPREPLY_FRONT_LEN;
@@ -395,7 +396,7 @@ struct ceph_osd_request *ceph_osdc_alloc_request(struct ceph_osd_client *osdc,
 
 	msg_size = 4 + 4 + 4; /* client_inc, osdmap_epoch, flags */
 	msg_size += 4 + 4 + 4 + 8; /* mtime, reassert_version */
-	msg_size += 2 + 4 + 8 + 4 + 4; /* oloc */
+	msg_size += 2 + 4 + 8 + 4 + 4 + 4 + CEPH_MAX_NAMESPACE_LEN; /* oloc */
 	msg_size += 1 + 8 + 4 + 4; /* pgid */
 	msg_size += 4 + CEPH_MAX_OID_NAME_LEN; /* oid */
 	msg_size += 2 + num_ops * sizeof(struct ceph_osd_op);
@@ -1607,9 +1608,22 @@ static int ceph_oloc_decode(void **p, void *end,
 	}
 
 	if (struct_v >= 5) {
-		len = ceph_decode_32(p);
-		if (len > 0) {
-			pr_warn("ceph_object_locator::nspace is set\n");
+		bool changed = false;
+		u32 ns_len = ceph_decode_32(p);
+		if (ns_len > 0) {
+			ceph_decode_need(p, end, ns_len, e_inval);
+			if (oloc->pool != -1 &&
+			    (oloc->pool_ns_len != ns_len ||
+			     memcmp(oloc->pool_ns, *p, ns_len)))
+				changed = true;
+			*p += ns_len;
+		} else {
+			if (oloc->pool != -1 && oloc->pool_ns_len > 0)
+				changed = true;
+		}
+		if (changed) {
+			/* redirect changes namespace */
+			pr_warn("ceph_object_locator::nspace is changed\n");
 			goto e_inval;
 		}
 	}
@@ -1783,6 +1797,7 @@ static void handle_reply(struct ceph_osd_client *osdc, struct ceph_msg *msg)
 	}
 
 	if (decode_redir) {
+		redir.oloc = req->r_target_oloc;
 		err = ceph_redirect_decode(&p, end, &redir);
 		if (err)
 			goto bad_put;
@@ -1795,7 +1810,7 @@ static void handle_reply(struct ceph_osd_client *osdc, struct ceph_msg *msg)
 
 		__unregister_request(osdc, req);
 
-		req->r_target_oloc = redir.oloc; /* struct */
+		req->r_target_oloc.pool = redir.oloc.pool;
 
 		/*
 		 * Start redirect requests with nofail=true.  If
@@ -2347,6 +2362,7 @@ void ceph_osdc_build_request(struct ceph_osd_request *req, u64 off,
 				struct timespec *mtime)
 {
 	struct ceph_msg *msg = req->r_request;
+	struct ceph_object_locator *oloc = &req->r_base_oloc;
 	void *p;
 	size_t msg_size;
 	int flags = req->r_flags;
@@ -2372,13 +2388,19 @@ void ceph_osdc_build_request(struct ceph_osd_request *req, u64 off,
 	p += sizeof(struct ceph_eversion); /* will get filled in */
 
 	/* oloc */
+	ceph_encode_8(&p, 5);
 	ceph_encode_8(&p, 4);
-	ceph_encode_8(&p, 4);
-	ceph_encode_32(&p, 8 + 4 + 4);
+	ceph_encode_32(&p, 8 + 4 + 4 + 4 + oloc->pool_ns_len);
 	req->r_request_pool = p;
 	p += 8;
 	ceph_encode_32(&p, -1);  /* preferred */
 	ceph_encode_32(&p, 0);   /* key len */
+	if (oloc->pool_ns_len > 0) {
+		ceph_encode_32(&p, oloc->pool_ns_len);
+		ceph_encode_copy(&p, oloc->pool_ns, oloc->pool_ns_len);
+	} else {
+		ceph_encode_32(&p, 0);
+	}
 
 	ceph_encode_8(&p, 1);
 	req->r_request_pgid = p;

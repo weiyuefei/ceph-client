@@ -170,6 +170,7 @@ struct ceph_osd_request {
 	struct ceph_object_id r_base_oid;
 	struct ceph_object_locator r_target_oloc;
 	struct ceph_object_id r_target_oid;
+	char r_pool_ns_buf[CEPH_MAX_NAMESPACE_LEN];
 
 	u64               r_snapid;
 	unsigned long     r_stamp;            /* send OR check time */
