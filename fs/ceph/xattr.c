@@ -16,6 +16,8 @@
 static int __remove_xattr(struct ceph_inode_info *ci,
 			  struct ceph_inode_xattr *xattr);
 
+const struct xattr_handler ceph_other_xattr_handler;
+
 /*
  * List of handlers for synthetic system.* attributes. Other
  * attributes are handled directly.
@@ -25,6 +27,7 @@ const struct xattr_handler *ceph_xattr_handlers[] = {
 	&posix_acl_access_xattr_handler,
 	&posix_acl_default_xattr_handler,
 #endif
+	&ceph_other_xattr_handler,
 	NULL,
 };
 
@@ -33,7 +36,6 @@ static bool ceph_is_valid_xattr(const char *name)
 	return !strncmp(name, XATTR_CEPH_PREFIX, XATTR_CEPH_PREFIX_LEN) ||
 	       !strncmp(name, XATTR_SECURITY_PREFIX,
 			XATTR_SECURITY_PREFIX_LEN) ||
-	       !strncmp(name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN) ||
 	       !strncmp(name, XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN) ||
 	       !strncmp(name, XATTR_USER_PREFIX, XATTR_USER_PREFIX_LEN);
 }
@@ -761,9 +763,6 @@ ssize_t __ceph_getxattr(struct inode *inode, const char *name, void *value,
 	int req_mask;
 	int err;
 
-	if (!ceph_is_valid_xattr(name))
-		return -ENODATA;
-
 	/* let's see if a virtual xattr was requested */
 	vxattr = ceph_match_vxattr(inode, name);
 	if (vxattr) {
@@ -823,15 +822,6 @@ ssize_t __ceph_getxattr(struct inode *inode, const char *name, void *value,
 out:
 	spin_unlock(&ci->i_ceph_lock);
 	return err;
-}
-
-ssize_t ceph_getxattr(struct dentry *dentry, const char *name, void *value,
-		      size_t size)
-{
-	if (!strncmp(name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN))
-		return generic_getxattr(dentry, name, value, size);
-
-	return __ceph_getxattr(d_inode(dentry), name, value, size);
 }
 
 ssize_t ceph_listxattr(struct dentry *dentry, char *names, size_t size)
@@ -982,8 +972,8 @@ int __ceph_setxattr(struct inode *inode, const char *name,
 	int required_blob_size;
 	bool lock_snap_rwsem = false;
 
-	if (!ceph_is_valid_xattr(name))
-		return -EOPNOTSUPP;
+	if (ceph_snap(inode) != CEPH_NOSNAP)
+		return -EROFS;
 
 	vxattr = ceph_match_vxattr(inode, name);
 	if (vxattr && vxattr->readonly)
@@ -1090,21 +1080,6 @@ out:
 	return err;
 }
 
-int ceph_setxattr(struct dentry *dentry, const char *name,
-		  const void *value, size_t size, int flags)
-{
-	if (ceph_snap(d_inode(dentry)) != CEPH_NOSNAP)
-		return -EROFS;
-
-	if (!strncmp(name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN))
-		return generic_setxattr(dentry, name, value, size, flags);
-
-	if (size == 0)
-		value = "";  /* empty EA, do not remove */
-
-	return __ceph_setxattr(d_inode(dentry), name, value, size, flags);
-}
-
 static int ceph_send_removexattr(struct inode *inode, const char *name)
 {
 	struct ceph_fs_client *fsc = ceph_sb_to_client(inode->i_sb);
@@ -1141,8 +1116,8 @@ static int __ceph_removexattr(struct inode *inode, const char *name)
 	int dirty;
 	bool lock_snap_rwsem = false;
 
-	if (!ceph_is_valid_xattr(name))
-		return -EOPNOTSUPP;
+	if (ceph_snap(inode) != CEPH_NOSNAP)
+		return -EROFS;
 
 	vxattr = ceph_match_vxattr(inode, name);
 	if (vxattr && vxattr->readonly)
@@ -1218,16 +1193,29 @@ do_sync_unlocked:
 	return err;
 }
 
-int ceph_removexattr(struct dentry *dentry, const char *name)
+static int ceph_get_xattr_handler(const struct xattr_handler *handler,
+				  struct dentry *dentry, const char *name,
+				  void *value, size_t size)
 {
-	if (ceph_snap(d_inode(dentry)) != CEPH_NOSNAP)
-		return -EROFS;
-
-	if (!strncmp(name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN))
-		return generic_removexattr(dentry, name);
-
-	return __ceph_removexattr(d_inode(dentry), name);
+	if (!ceph_is_valid_xattr(name))
+		return -EOPNOTSUPP;
+	return __ceph_getxattr(d_inode(dentry), name, value, size);
 }
+
+static int ceph_set_xattr_handler(const struct xattr_handler *handler,
+				  struct dentry *dentry, const char *name,
+				  const void *value, size_t size, int flags)
+{
+	if (!ceph_is_valid_xattr(name))
+		return -EOPNOTSUPP;
+	return __ceph_setxattr(d_inode(dentry), name, value, size, flags);
+}
+
+const struct xattr_handler ceph_other_xattr_handler = {
+	.prefix = "",  /* match any name => handlers called with full name */
+	.get = ceph_get_xattr_handler,
+	.set = ceph_set_xattr_handler,
+};
 
 #ifdef CONFIG_SECURITY
 bool ceph_security_xattr_wanted(struct inode *in)
