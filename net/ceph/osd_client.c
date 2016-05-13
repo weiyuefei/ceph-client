@@ -2624,7 +2624,7 @@ int ceph_osdc_wait_request(struct ceph_osd_client *osdc,
 
 	dout("%s %p tid %llu\n", __func__, req, req->r_tid);
 
-	rc = wait_for_completion_interruptible(&req->r_completion);
+	rc = wait_for_completion_killable(&req->r_completion);
 	if (rc < 0) {
 		dout("%s %p tid %llu interrupted\n", __func__, req, req->r_tid);
 		ceph_osdc_cancel_request(req);
