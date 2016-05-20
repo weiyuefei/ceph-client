@@ -3002,10 +3002,9 @@ static void handle_cap_grant(struct ceph_mds_client *mdsc,
 	if (fill_inline)
 		ceph_fill_inline_data(inode, NULL, inline_data, inline_len);
 
-	if (queue_trunc) {
+	if (queue_trunc)
 		ceph_queue_vmtruncate(inode);
-		ceph_queue_revalidate(inode);
-	} else if (queue_revalidate)
+	else if (queue_revalidate)
 		ceph_queue_revalidate(inode);
 
 	if (writeback)
@@ -3208,10 +3207,8 @@ static void handle_cap_trunc(struct inode *inode,
 					  truncate_seq, truncate_size, size);
 	spin_unlock(&ci->i_ceph_lock);
 
-	if (queue_trunc) {
+	if (queue_trunc)
 		ceph_queue_vmtruncate(inode);
-		ceph_fscache_invalidate(inode);
-	}
 }
 
 /*
