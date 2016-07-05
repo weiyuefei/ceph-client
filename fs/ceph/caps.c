@@ -2109,6 +2109,9 @@ void ceph_early_kick_flushing_caps(struct ceph_mds_client *mdsc,
 		    ci->i_flushing_caps) {
 			__kick_flushing_caps(mdsc, session, ci,
 					     oldest_flush_tid);
+			ci->i_ceph_flags &= ~CEPH_I_KICK_FLUSH;
+		} else {
+			ci->i_ceph_flags |= CEPH_I_KICK_FLUSH;
 		}
 
 		spin_unlock(&ci->i_ceph_lock);
@@ -2119,6 +2122,7 @@ void ceph_kick_flushing_caps(struct ceph_mds_client *mdsc,
 			     struct ceph_mds_session *session)
 {
 	struct ceph_inode_info *ci;
+	struct ceph_cap *cap;
 	u64 oldest_flush_tid;
 
 	dout("kick_flushing_caps mds%d\n", session->s_mds);
@@ -2129,7 +2133,18 @@ void ceph_kick_flushing_caps(struct ceph_mds_client *mdsc,
 
 	list_for_each_entry(ci, &session->s_cap_flushing, i_flushing_item) {
 		spin_lock(&ci->i_ceph_lock);
-		__kick_flushing_caps(mdsc, session, ci, oldest_flush_tid);
+		cap = ci->i_auth_cap;
+		if (!(cap && cap->session == session)) {
+			pr_err("%p auth cap %p not mds%d ???\n",
+				&ci->vfs_inode, cap, session->s_mds);
+			spin_unlock(&ci->i_ceph_lock);
+			continue;
+		}
+		if (ci->i_ceph_flags & CEPH_I_KICK_FLUSH) {
+			__kick_flushing_caps(mdsc, session, ci,
+					     oldest_flush_tid);
+			ci->i_ceph_flags &= ~CEPH_I_KICK_FLUSH;
+		}
 		spin_unlock(&ci->i_ceph_lock);
 	}
 }
